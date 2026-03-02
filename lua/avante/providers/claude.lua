@@ -145,6 +145,12 @@ local function setup_token_management()
   vim.g.avante_login = true
 end
 
+function M.reauthenticate()
+  local claude_token_file = Path:new(claude_path)
+  vim.schedule(function() pcall(claude_token_file.rm, claude_token_file) end)
+  M.authenticate()
+end
+
 function M.setup()
   local claude_token_file = Path:new(claude_path)
   local auth_type = P[Config.provider].auth_type
@@ -827,6 +833,20 @@ function M.refresh_token(async, force)
 
   local function handle_response(response)
     if response.status >= 400 then
+      if response.body.error == "invalid_grant" then
+        vim.schedule(
+          vim.notify(
+            string.format(
+              "[%s]Failed to refresh access token, re-authenticating...: %s",
+              response.status,
+              response.body
+            ),
+            vim.log.levels.ERROR
+          )
+        )
+        M.reauthenticate()
+        return false
+      end
       vim.schedule(
         function()
           vim.notify(
@@ -837,9 +857,9 @@ function M.refresh_token(async, force)
       )
       return false
     else
-      local ok, tokens = pcall(vim.json.decode, response.body)
+      local ok, resp = pcall(vim.json.decode, response.body)
       if ok then
-        M.store_tokens(tokens)
+        M.store_tokens(resp)
 
         return true
       else
@@ -870,8 +890,6 @@ function M.store_tokens(tokens)
   M.state.claude_token = json
 
   vim.schedule(function()
-    local data_path = vim.fn.stdpath("data") .. "/avante/claude-auth.json"
-
     -- Safely encode JSON
     local ok, json_str = pcall(vim.json.encode, json)
     if not ok then
@@ -880,7 +898,7 @@ function M.store_tokens(tokens)
     end
 
     -- Open file for writing
-    local file, open_err = io.open(data_path, "w")
+    local file, open_err = io.open(claude_path, "w")
     if not file then
       Utils.error("Failed to save token file: " .. tostring(open_err), { once = true, title = "Avante" })
       return
@@ -897,7 +915,7 @@ function M.store_tokens(tokens)
 
     -- Set file permissions (Unix only)
     if vim.fn.has("unix") == 1 then
-      local chmod_ok = vim.loop.fs_chmod(data_path, 384) -- 0600 in decimal
+      local chmod_ok = vim.loop.fs_chmod(claude_path, 384) -- 0600 in decimal
       if not chmod_ok then Utils.warn("Failed to set token file permissions", { once = true, title = "Avante" }) end
     end
   end)
